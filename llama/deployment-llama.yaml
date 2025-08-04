@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama2-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llama2
+  template:
+    metadata:
+      labels:
+        app: llama2
+    spec:
+      nodeSelector:
+         "node.k8s.ovh/type": gpu
+      containers:
+      - name: llama2
+        image: ghcr.io/huggingface/text-generation-inference:1.4
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: 32Gi
+            cpu: "4"
+        env:
+        - name: MODEL_ID
+          value: meta-llama/Llama-2-7b-chat-hf
+        ports:
+        - containerPort: 80

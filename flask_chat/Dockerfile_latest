@@ -1,0 +1,3 @@
+FROM equalitie/baskerville_ai:base2
+
+COPY . .

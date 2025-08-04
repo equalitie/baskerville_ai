@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: baskerville-ai-service
+spec:
+  type: ClusterIP
+  selector:
+    app: baskerville-ai
+  ports:
+    - port: 80
+      targetPort: 5000

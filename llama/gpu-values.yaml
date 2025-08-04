@@ -1,0 +1,17 @@
+driver:
+  enabled: true
+  repository: nvidia
+  image: driver
+#  version: 535-ubuntu22.04
+
+toolkit:
+  enabled: true
+
+dcgmExporter:
+  enabled: false
+  config:
+    name: ""
+
+operator:
+  defaultRuntime: runc
+  use_ocp_driver_toolkit: false

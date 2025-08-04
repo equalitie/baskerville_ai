@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: baskerville-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: baskerville-ai
+  template:
+    metadata:
+      labels:
+        app: baskerville-ai
+    spec:
+      containers:
+      - name: baskerville-ai
+        image: equalitie/baskerville_ai:latest
+        command: ["gunicorn"]
+        args: [ "-w", "4", "-b", "0.0.0.0:5000", "--timeout", "240", "--graceful-timeout", "240", "app:app" ]
+        ports:
+        - containerPort: 5000
+        envFrom:
+          - configMapRef:
+              name: baskerville-ai
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secret
+              key: OPENAI_API_KEY
+        - name: FLASK_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secret
+              key: FLASK_SECRET_KEY
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 2
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 5000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 2
+          successThreshold: 1
+          failureThreshold: 3

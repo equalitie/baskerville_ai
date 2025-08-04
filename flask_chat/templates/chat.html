@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat Agent</title>
+</head>
+<body>
+    <h1>AI Agent</h1>
+    <form method="POST">
+        <input type="text" name="message" style="width: 60%;" autofocus required />
+        <button type="submit">Send</button>
+    </form>
+
+    {% if response %}
+        <h3>AI:</h3>
+        <p>{{ response }}</p>
+    {% endif %}
+
+    <br>
+    <a href="{{ url_for('reset') }}">🔁 Start New Session</a>
+</body>
+</html>
