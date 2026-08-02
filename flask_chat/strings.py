@@ -59,6 +59,149 @@ CATEGORICAL_FEATURE_DESCRIPTIONS = {
     "timezone": "Client's reported timezone"
 }
 
+INCIDENT_REPORT_RULES = """
+When the user asks for an incident report (e.g. "report for last 3 days", "what happened this week", "incidents for country X"):
+
+1. Query the `incidents` table. Key columns:
+   - host, started_at, ended_at, challenge_count, baseline_avg, spike_ratio
+   - source — either 'spike_detector' (classic traffic spike) or 'cluster_analysis' (coordinated bot cluster)
+   - survey_country (the site's PRIMARY audience — legitimate users)
+   - block_criteria — JSONB with blocking criteria (for cluster_analysis incidents)
+   - botnet_info — use LEFT(botnet_info, 300) only, never full column
+   - NEVER select: behavior_samples, avg_api_ratio, avg_path_diversity
+
+   TWO TYPES OF INCIDENTS — treat them differently:
+
+   A) source = 'spike_detector' — classic traffic spike incident:
+      - spike_ratio = how many times traffic exceeded baseline (e.g. 5.0 = 5× baseline)
+      - challenge_count = number of challenge/block commands issued
+      - narrative describes the spike, origin country, AI response
+
+   B) source = 'cluster_analysis' — coordinated bot cluster detected:
+      - spike_ratio = uniformity_score (0.70–1.0) — how uniform/bot-like the cluster is
+      - challenge_count = 0 always (point-in-time detection, not a tracked spike)
+      - narrative starts with "[CLUSTER] uniformity_score=X.XX sessions=N"
+      - block_criteria JSONB contains what was blocked:
+        * type='fingerprint' → all IPs sharing a TLS fingerprint were challenged
+        * type='ip_list', reason contains 'interval_cv<0.05' → IPs with perfect bot timer (blocked)
+        * type='ip_list', reason contains '0.05–0.10' → suspicious IPs (challenged)
+        * type='ua_exact', is_scripted=true → scripted UA (Go-http-client, curl, etc.) — IPs blocked + UA saved for future blocking
+        * type='ua_exact', is_scripted=false → browser-like UA (GPTBot, ClaudeBot, etc.) — IPs challenged only
+
+2. Join with `first_responder_actions` on incident_id to get: action, target, confidence, reasoning
+
+3. Time filter: use exactly what the user says (last 3 days, last month, last quarter, Q1 2026, etc.).
+   If the user does not mention any time period, default to last 7 days.
+   If user mentions a country (e.g. "for RU sites"), filter by survey_country.
+
+4. For "overlapping IPs" or "botnet overlap" or "same IPs across sites" questions:
+   SELECT i.host, i.started_at, i.spike_ratio, LEFT(i.botnet_info, 300) as botnet_info, a.action, a.target
+   FROM incidents i
+   LEFT JOIN first_responder_actions a ON a.incident_id = i.id
+   WHERE i.started_at > NOW() - INTERVAL '7 days'
+     AND i.botnet_info IS NOT NULL AND i.botnet_info != ''
+   ORDER BY i.started_at DESC
+   LIMIT 20
+
+5. Standard incident query example (both spike and cluster):
+   SELECT i.host, i.started_at, i.ended_at,
+          i.source,
+          EXTRACT(EPOCH FROM (COALESCE(i.ended_at, NOW()) - i.started_at))/60 AS duration_minutes,
+          i.spike_ratio, i.challenge_count, i.survey_country,
+          LEFT(i.botnet_info, 300) as botnet_info,
+          i.narrative,
+          a.action, a.target, a.confidence, a.reasoning
+   FROM incidents i
+   LEFT JOIN first_responder_actions a ON a.incident_id = i.id
+   WHERE i.started_at > NOW() - INTERVAL '7 days'
+   ORDER BY i.started_at DESC
+   LIMIT 30
+
+6. After retrieving data, write a HUMAN ANALYSIS — not a data dump. Follow these rules:
+
+   TONE: Write like a security analyst giving a briefing. Be concise. Highlight what's unusual.
+
+   STRUCTURE:
+   ## Incident Report — [time period]
+
+   **Overview**
+   One sentence: how many incidents total, split by type (spike vs cluster), any major ones?
+
+   **Notable incidents**
+   Only mention incidents worth attention. For each, use this format — NO numbered lists, use `---` as separator:
+
+   CRITICAL: ALWAYS use the ACTUAL domain name from the `host` column (e.g. "verafiles.org", "site.com").
+   NEVER write "Primary site", "the site", "this site", or any other placeholder instead of the real domain name.
+   The `host` column contains the exact domain name — use it verbatim.
+
+   If the `narrative` column is not NULL, use it as the body of the incident entry — it is a pre-generated
+   summary that already contains start time, spike, duration, origin, and AI response. Just prepend the
+   header line and append any botnet overlap info if present.
+
+   If `narrative` IS NULL (older incidents), reconstruct the summary from the raw columns as before.
+
+   FORMAT for spike_detector incidents:
+   ---
+   **verafiles.org** — 2026-06-18 23:50, spike ×42, duration 47 min, 1.3K commands, blocked CN/VN (high confidence)
+   Attack from Vietnam (95% of traffic), site audience is UA. AI blocked. Botnet overlap with site2.com.
+   ---
+
+   FORMAT for cluster_analysis incidents:
+   ---
+   **[CLUSTER] pkds.cc** — 2026-08-02 11:40, uniformity 0.71, 500 sessions, scripted UA Go-http-client/1.1 (87%)
+   Coordinated botnet: 9 IPs with perfect bot timer (cv<0.05) blocked; 427 IPs with scripted UA blocked + UA added to blocklist.
+   ---
+   For cluster incidents: show uniformity score (= spike_ratio), number of sessions, top signal (fingerprint / scripted UA / interval_cv).
+   Summarize what block_criteria contained: how many IPs blocked/challenged, by what method.
+
+   Duration rules:
+   - Show duration as: "X min" if under 60 minutes, "X h Y min" if over 60 minutes
+   - If ended_at is NULL, the incident is still ongoing — write "ongoing"
+   - cluster_analysis incidents have duration 0 (point-in-time) — do NOT show duration for them
+   - Long duration (>2h) is notable for spike incidents — flag it
+
+   Criteria for inclusion:
+   Spike incidents:
+   - Very high spike_ratio (>20x) → flag as major
+   - Unusual attack source (unexpected country for that site's audience)
+   - Cross-site botnet overlap (botnet_info mentions other sites) → most interesting signal
+   - Repeated attacks on the same host → persistent campaign
+   - If AI blocked something (action = block_country / block_asn / block_ua) → mention what and why
+   Cluster incidents:
+   - uniformity_score (spike_ratio) >= 0.80 → flag as major
+   - Scripted UA (Go-http-client, curl, python-requests) → especially dangerous
+   - Single IP making hundreds of sessions → concentrated attack
+   - Many IPs blocked (ip_list criterion) → distributed botnet
+
+   DO NOT number incidents. DO NOT use "Incident ID: 123" style. Use hostname as the identifier.
+
+   ACCURACY RULES — strictly follow, never invent:
+   - ONLY report actions that are literally in the data (action column).
+   - action values for spike incidents: block_country, block_asn, block_ua, raise_threshold, monitor_only, challenge_session, challenge_ip.
+   - action values for cluster incidents: block_ip, challenge_ip (these come from first_responder_actions).
+   - raise_threshold is NOT a block. NEVER say "blocked" if action = raise_threshold.
+   - If action = raise_threshold → say "AI raised the challenge threshold"
+   - If action = block_country → say "AI blocked country X"
+   - If action = block_asn → say "AI blocked ASN: [target]"
+   - If action = block_ip (cluster) → say "AI blocked N IPs"
+   - If action = challenge_ip (cluster) → say "AI challenged N IPs"
+   - NEVER infer or guess what was blocked if it's not in the target column.
+   - NEVER say "blocked CN" unless action = block_country AND target contains CN.
+
+   **Cross-site patterns** (if botnet_info shows overlap with other sites)
+   Mention it explicitly — same IPs hitting multiple sites = coordinated campaign against independent media.
+
+   **Quiet periods / nothing unusual**
+   If all incidents are small and routine (spike <10x, diffuse, raise_threshold), say so clearly:
+   "No major incidents. Routine low-level traffic spikes, all handled automatically."
+
+   **AI actions summary**
+   Brief: how many times did AI block (block_country/block_asn/block_ua) vs raise_threshold vs monitor_only?
+
+   DO NOT list every incident row. Summarize. Focus on what's interesting or unusual.
+   If user asks for a specific host or country, focus on that.
+"""
+
 EXPLANATION_RULES = """
 When presenting results for challenge_command_history:
 1. Group all rows by IP address into a single summary.
@@ -69,17 +212,19 @@ When presenting results for challenge_command_history:
 4. Aggregate unique abnormal features across all rows (no duplicates).
 5. Use the following format:
 
-IP: <ip>
-Country: <country>
-User Agent: <user_agent>
-Reason: <translated_meta>
-Key abnormal features:
+**IP:** <ip>
+**Site(s):** <host_name — list unique values if multiple>
+**Country:** <country>
+**User Agent:** <user_agent>
+**Reason:** <translated_meta>
+
+**Key abnormal features:**
 - <feature_name> (<value>) → <description>
 
-Summary:
+**Summary:**
 <short explanation of why it's suspicious>
 
-Possible causes:
+**Possible causes:**
 - Bot activity
 - Scraping attempts
 - DDoS probing
@@ -100,10 +245,15 @@ PROMPT_TEMPLATE = """
     If you get an error, rewrite the query and try again.
 
     DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.).
-    
-    If you already have the final answer, respond directly to the user. 
-    Do not re-run the same SQL query multiple times.
-    Try to make a single query, usually to the table 'challenge_command_history'
+
+    CRITICAL RULES — you MUST follow these or you will fail:
+    - You are allowed at most 3 tool calls total. After 3 tool calls, you MUST write the final answer.
+    - NEVER call sql_db_schema or sql_db_list_tables — you already know the schema from this prompt.
+    - Run ONE SQL query, then immediately write the answer based on the results.
+    - NEVER re-run a query. NEVER run a second query unless the first returned an error.
+    - If you already have query results, stop and write the answer NOW.
+    - For "example", "sample", "give me one", "show me one" type requests: use LIMIT 1. Do not over-fetch.
+    - Always add WHERE created_at > NOW() - INTERVAL '3 days' (or started_at for incidents) unless user asks for older data.
 
 
 Mapping rules for database references:
@@ -166,7 +316,12 @@ General rules:
 - Do not ask the user which table to use — infer it from these rules.
 - If multiple interpretations are possible (e.g., IP appears in more than one table), choose the most relevant one based on the rest of the question.
 - Never query for all columns, only the relevant ones.
-- Never include the `requests` column in any query, unless the user explicitly asks for it.
+- NEVER include these columns in any SELECT: `requests`, `behavior_samples`. They are too large and will cause errors.
+- For `botnet_info`: use LEFT(botnet_info, 300) if you need it, never select the full column.
+- Keep queries minimal — fetch only what is needed to answer the question. Avoid joining large result sets.
+
+If the user asks for an incident report, follow these INCIDENT_REPORT_RULES exactly:
+{INCIDENT_REPORT_RULES}
 
 If the query returns challenge_command_history rows, follow these EXPLANATION_RULES exactly:
 {EXPLANATION_RULES}
