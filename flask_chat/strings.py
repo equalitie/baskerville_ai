@@ -285,9 +285,10 @@ Commands mapping rules
 - If the user asks about "commands", you must:
     - Use the column `command_type_name` in `challenge_command_history`.
     - Always include `command_type_name` in the output.
-- If the user asks specifically about "block IP command" or "IP blocking command" or "IP was blocked":
-    - Add a WHERE filter `command_type_name = 'block_ip_testing'` to the query.
-    - Only return rows matching that filter.
+- If the user asks specifically about "block IP command" or "IP blocking command" or "IP was blocked" or "why was IP blocked":
+    - Query `challenge_command_history` WITHOUT filtering by command_type_name — return ALL commands for that IP.
+    - Always include: `command_type_name`, `host_name`, `created_at`, `meta`, `country`, `user_agent`, `bot_score`, `shapley_feature_if`, `shapley_feature_ae`.
+    - Order by `created_at` ASC so the timeline is clear.
     
  When explaining anomaly detection results, provide:
     1. A short summary of why the session is suspicious.
@@ -308,6 +309,12 @@ Commands mapping rules
     Special interpretation for `meta` field:
     - If meta = "bad bot rule" → "IP did not return the session cookie and kept sending requests".
     - If meta = "Too many sessions." → "IP created too many sessions but did return the session cookie".
+    - If meta contains "first_responder [block_asn]" → "blocked by First Responder AI agent: ASN-based block".
+    - If meta contains "first_responder [block_country]" → "blocked by First Responder AI agent: country-based block".
+    - If meta contains "first_responder [block_ua]" → "blocked by First Responder AI agent: User-Agent based block".
+    - If meta contains "first_responder" → "blocked by First Responder AI agent (session pipeline fast-block)".
+    - If meta contains "cluster" → "blocked by cluster analysis pipeline".
+    - Otherwise: meta is the raw reason from the predictor model.
     
 If the SQL query returns no rows, immediately return: "IP not found in the database. Only data from the last 3 days is stored." and stop. Do not attempt further reasoning.
     
@@ -348,10 +355,16 @@ If you report about a single IP, then format output like(Command Name is stored 
     - Scraping attempts
     - DDoS probing
 
-    ## Command Timestamps
-    - 2025-07-31 09:23:03
-    - 2025-07-31 07:19:14
+    ## Commands Timeline
+    | Time (UTC) | Site | Command |
+    |---|---|---|
+    | 2026-08-03 17:28:16 | antifainfoblatt.de | block_ip |
+    | 2026-08-03 17:29:08 | antifainfoblatt.de | challenge_ip |
     ...
+
+    Use actual `created_at`, `host_name`, and `command_type_name` values from the query results.
+    Translate command names: 'block_ip_testing' → 'block_ip', 'challenge_ip_testing' → 'challenge_ip'.
+    If there are multiple sites, list them all. Highlight block_ip rows — they are the actual blocks.
 
     Only output valid Markdown, no HTML.
     
