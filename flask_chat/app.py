@@ -35,7 +35,7 @@ postgres_connection = {
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # --- CONFIG ---
-HARD_PASSWORD = "Baskerville2025"
+HARD_PASSWORD = os.getenv("APP_PASSWORD")  # no default: login is refused until it is set
 
 from langchain.tools import tool
 
@@ -212,7 +212,7 @@ def health():
 def login():
     if request.method == "POST":
         password = request.form.get("password", "")
-        if password == HARD_PASSWORD:
+        if HARD_PASSWORD and password == HARD_PASSWORD:
             resp = make_response(redirect("/"))
             resp.set_cookie("auth_ok", "1", max_age=60*60*24*7, httponly=True, samesite="None", secure=True)
             return resp
